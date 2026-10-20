@@ -1,11 +1,15 @@
 {
     "name": "obsidian-link-converter",
-    "version": "0.1.6",
+    "version": "0.1.7",
     "description": "Scan all your links in the vault and convert them to your desired format.",
     "main": "main.js",
     "scripts": {
         "dev": "rollup --config rollup.config.js -w",
-        "build": "rollup --config rollup.config.js --environment BUILD:production"
+        "build": "rollup --config rollup.config.js --environment BUILD:production",
+        "test": "node test/run-tests.js",
+        "install:all": "node scripts/install-all-vaults.js",
+        "test:bundle": "npm run build && node test/bundle.test.js",
+        "test:all": "npm test && npm run test:bundle"
     },
     "keywords": [],
     "author": "",

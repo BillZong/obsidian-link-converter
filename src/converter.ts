@@ -235,7 +235,9 @@ export const convertLinksInFileToPreferredFormat = async (mdFile: TFile, plugin:
         let file = plugin.app.metadataCache.getFirstLinkpathDest(fileLink, linkMatch.sourceFilePath);
         if (file) {
             fileLink = getFileLinkInFormat(file, mdFile, plugin, finalFormat);
-            fileText = fileText.replace(linkMatch.match, createLink(linkMatch.type, fileLink, linkMatch.altOrBlockRef, mdFile, plugin));
+            // 把已解析出的 file 传进去，避免 createLink 对改写后的路径二次解析。
+            // 二次解析失败会跳过归一，产出无法解析的半成品链接。
+            fileText = fileText.replace(linkMatch.match, createLink(linkMatch.type, fileLink, linkMatch.altOrBlockRef, mdFile, plugin, file));
         }
     }
     let fileStat = plugin.settings.keepMtime ? await plugin.app.vault.adapter.stat(normalizePath(mdFile.path)) : {};
@@ -261,15 +263,68 @@ const getFileLinkInFormat = (file: TFile, sourceFile: TFile, plugin: LinkConvert
     return fileLink;
 };
 
+/**
+ * Wikilink 专用：把路径归一成 Obsidian 能解析的形式。
+ *
+ * Wikilink 从**库根**解析，带 `../` 的相对路径一定指错地方。
+ * 有效形式只有两种：库根相对路径（a/b/note）与唯一文件名。
+ *
+ * 设置里的 relative-path 对 Wikilink 无效（那是 Markdown 的概念），
+ * 因此这里把它映射到库根相对路径，而不是产出一个必然断链的结果。
+ */
+function toWikiPath(file: TFile, plugin: LinkConverterPlugin, finalFormat: FinalFormat): string {
+    if (finalFormat === 'shortest-path') {
+        const allFilesInVault = plugin.app.vault.getFiles();
+        const filesWithSameName = allFilesInVault.filter((f) => f.name === file.name);
+        if (filesWithSameName.length === 1) return file.name;
+    }
+    return file.path.replace(/\.md$/, '');
+}
+
 /* -------------------- HELPERS -------------------- */
 
-const createLink = (dest: LinkType, originalLink: string, altOrBlockRef: string, sourceFile: TFile, plugin: LinkConverterPlugin): string => {
+const createLink = (dest: LinkType, originalLink: string, altOrBlockRef: string, sourceFile: TFile, plugin: LinkConverterPlugin, knownFile?: TFile): string => {
     let finalLink = originalLink;
     let altText: string;
 
     let fileLink = decodeURI(finalLink);
-    let file = plugin.app.metadataCache.getFirstLinkpathDest(fileLink, sourceFile.path);
-    if (file && plugin.settings.finalLinkFormat !== 'not-change') finalLink = getFileLinkInFormat(file, sourceFile, plugin, plugin.settings.finalLinkFormat);
+    // knownFile 由调用方传入：它已经解析过一次，不必也不应该再解析一遍。
+    // 二次解析在路径被改写后（如 a/b → ../../a/b）可能失败，
+    // 一旦失败就会跳过下面的归一，直接把半成品链接写出去。
+    let file = knownFile || plugin.app.metadataCache.getFirstLinkpathDest(fileLink, sourceFile.path);
+
+    // 自愈：库里可能已经存在被旧版本写坏的链接，例如
+    //   [[../../00_Inbox/随想/X.md.md]]   —— 多了一层扩展名
+    //   [[00_Inbox/随想/X.md]]            —— Wikilink 不该带扩展名
+    // 这些链接按原样解析不到目标，就无法进入下面的归一分支，
+    // 于是坏链接会被原样保留、越转越坏。
+    // 所以解析失败时再退一步：去掉一层 .md 重试，让插件能修复历史损坏。
+    if (!file && /\.md$/i.test(fileLink)) {
+        file = plugin.app.metadataCache.getFirstLinkpathDest(fileLink.replace(/\.md$/i, ''), sourceFile.path);
+    }
+
+    if (file) {
+        // Wiki 与 Markdown 的路径解析规则完全不同，混用必然产生断链：
+        //   * Wikilink  从**库根**解析，且惯例不带 .md
+        //   * Markdown  从**源文件所在目录**解析
+        // 所以这里按目标格式分别归一，而不是对两种格式用同一套路径。
+        const toWiki = dest === 'wiki' || dest === 'wikiTransclusion';
+        if (!toWiki) {
+            // Markdown：唯一能被解析的形式是「相对源文件目录」或文件系统绝对路径。
+            // 库根相对路径（如 00_Inbox/随想/某.md）在这里一定是错的——
+            // 无论 finalLinkFormat 设成 absolute-path 还是 shortest-path。
+            //
+            // 注意要去掉 .md：fileExtension 会在后面补回去，
+            // 不去就会产出 `某.md.md` 这种双扩展名链接。
+            finalLink = getRelativeLink(sourceFile.path, file.path).replace(/\.md$/, '');
+        } else if (plugin.settings.finalLinkFormat !== 'not-change') {
+            finalLink = toWikiPath(file, plugin, plugin.settings.finalLinkFormat);
+        } else {
+            // not-change 也必须归一：来源可能是 Markdown 的 ../../a/b/x.md，
+            // 原样塞进 Wikilink 会带上 ../ 前缀与 .md 后缀，两个都会让它指错地方。
+            finalLink = file.path.replace(/\.md$/, '');
+        }
+    }
 
     // If final link is in markdown format and the file is md, the extension should be included
     const fileExtension = file && file.extension === 'md' ? `.${file.extension}` : '';
@@ -345,6 +400,12 @@ function getRelativeLink(sourceFilePath: string, linkedFilePath: string) {
 
     var fromParts = trim(sourceFilePath.split('/'));
     var toParts = trim(linkedFilePath.split('/'));
+
+    // 链接指向自己：相对路径就是同目录下的文件名。
+    // 少了这一支，算出来的会是空串，最终产出 `](.md)` 这种指向当前文件的空链接。
+    if (fromParts.length && fromParts.length === toParts.length && fromParts.every((p, i) => p === toParts[i])) {
+        return fromParts[fromParts.length - 1];
+    }
 
     var length = Math.min(fromParts.length, toParts.length);
     var samePartsLength = length;
