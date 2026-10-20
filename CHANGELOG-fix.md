@@ -40,6 +40,11 @@ Wikilink 与 Markdown 的路径解析基准不同：
    里继续得到旧行为且不易察觉。脚本从 `obsidian.json` 读取已注册 Vault，
    逐个比对 sha256、只更新落后的，安装前自动备份，支持 `--dry-run` 与
    `--vault <路径>`。
+9. **支持「先卸载再安装」**（`npm run install:all -- --reinstall`）。
+   换版本时不要直接覆盖文件：Obsidian 内存里仍是已加载的旧插件，插件目录里
+   也可能残留旧文件。这个流程等价于 Obsidian 界面上的「卸载 → 放入新文件 →
+   启用」：先把插件从 `community-plugins.json` 的启用列表摘掉、把插件目录移到
+   备份区，再写入新构建产物并重新注册为启用。
 
 ## 测试
 
